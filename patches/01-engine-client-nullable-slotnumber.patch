@@ -1,0 +1,38 @@
+diff --git a/pkg/rpc/engine/client.go b/pkg/rpc/engine/client.go
+index ce8b55d..355ce55 100644
+--- a/pkg/rpc/engine/client.go
++++ b/pkg/rpc/engine/client.go
+@@ -104,7 +104,9 @@ type executionPayloadJSON struct {
+ 	// BlockAccessList is raw so we tolerate null / non-hex shapes from ELs that
+ 	// haven't settled on the final Amsterdam encoding yet. Decoded in UnmarshalJSON.
+ 	BlockAccessList json.RawMessage `json:"blockAccessList,omitempty"`
+-	SlotNumber      hexutil.Uint64  `json:"slotNumber,omitempty"`
++	// SlotNumber is a pointer because pre-Amsterdam ELs return `null` here
++	// instead of omitting the field, and hexutil.Uint64 doesn't accept null.
++	SlotNumber *hexutil.Uint64 `json:"slotNumber,omitempty"`
+ }
+ 
+ // UnmarshalJSON implements json.Unmarshaler for ExecutionPayload.
+@@ -137,7 +139,9 @@ func (p *ExecutionPayload) UnmarshalJSON(data []byte) error {
+ 	p.ExcessBlobGas = uint64(j.ExcessBlobGas)
+ 	p.ParentBeaconRoot = j.ParentBeaconRoot
+ 	p.BlockAccessList = DecodeBlockAccessList(j.BlockAccessList)
+-	p.SlotNumber = uint64(j.SlotNumber)
++	if j.SlotNumber != nil {
++		p.SlotNumber = uint64(*j.SlotNumber)
++	}
+ 	return nil
+ }
+ 
+@@ -183,7 +187,10 @@ func (p *ExecutionPayload) MarshalJSON() ([]byte, error) {
+ 		BlobGasUsed:      hexutil.Uint64(p.BlobGasUsed),
+ 		ExcessBlobGas:    hexutil.Uint64(p.ExcessBlobGas),
+ 		ParentBeaconRoot: p.ParentBeaconRoot,
+-		SlotNumber:       hexutil.Uint64(p.SlotNumber),
++	}
++	if p.SlotNumber != 0 {
++		sn := hexutil.Uint64(p.SlotNumber)
++		j.SlotNumber = &sn
+ 	}
+ 	if len(p.BlockAccessList) > 0 {
+ 		j.BlockAccessList, _ = json.Marshal(hexutil.Bytes(p.BlockAccessList))

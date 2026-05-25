@@ -1,0 +1,42 @@
+# Python / uv
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+.python-version
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# eest-replay outputs
+# Runner working directories (genesis.json / JWT / geth datadir / el.log live here).
+work-dir*/
+eest-replay-*/
+**/el.log
+**/buildoor.log
+**/genesis.json
+**/jwt.hex
+
+# Generated reports — keep them out of version control by default.
+report.json
+report.md
+*.report.json
+*.report.md
+
+# Sensitive: the mainnet RPC creds file sits one level up from this repo
+# in the dev tree. Belt and braces in case anyone copies it in.
+rpc.txt
+**/rpc.txt
+.env
+.env.*
+*.secret
+*.key
+!**/*.example.key
+
+# Filled fixtures live in execution-specs/.just/, not here.
+.just/
