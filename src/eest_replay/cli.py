@@ -206,9 +206,13 @@ def _print_result(result: FixtureResult) -> None:
               help="Allow tests/benchmark/ selection.")
 @click.option("--gas-benchmark-values", default=None,
               help="Gas limits in WHOLE millions for benchmark tests, e.g. "
-              "'1' or '8,16'. Default: the fork's max per-tx gas (16 on "
-              "Osaka+, i.e. 16M, the largest whole-million under the 2**24 "
-              "EIP-7825 cap).")
+              "'1' or '8,16'. Overrides the default. (For the fork's exact max "
+              "per-tx gas use --transaction-gas-limit instead.)")
+@click.option("--transaction-gas-limit", type=int, default=None,
+              help="Raw per-tx gas limit (exact, not whole-millions) for "
+              "benchmark tests. Default for benchmark runs: the fork's per-tx "
+              "cap (2**24 = 16,777,216 on Osaka+), so the test tx lands on "
+              "exactly the max. Overrides --gas-benchmark-values.")
 @click.option("-k", "k_filter", default=None,
               help="pytest -k filter passed through to `execute remote`.")
 @click.option("-v", "--verbose", count=True)
@@ -224,6 +228,7 @@ def export_cmd(
     tx_wait_timeout: int,
     include_benchmark: bool,
     gas_benchmark_values: str | None,
+    transaction_gas_limit: int | None,
     k_filter: str | None,
     verbose: int,
 ) -> None:
@@ -255,6 +260,7 @@ def export_cmd(
         tx_wait_timeout=tx_wait_timeout,
         include_benchmark=include_benchmark,
         gas_benchmark_values=gas_benchmark_values,
+        transaction_gas_limit=transaction_gas_limit,
         k_filter=k_filter,
     )
 
@@ -306,9 +312,13 @@ def export_cmd(
               help="Allow tests/benchmark/ selection.")
 @click.option("--gas-benchmark-values", default=None,
               help="Gas limits in WHOLE millions for benchmark tests, e.g. "
-              "'1' or '8,16'. Default: the fork's max per-tx gas (16 on "
-              "Osaka+, i.e. 16M, the largest whole-million under the 2**24 "
-              "EIP-7825 cap).")
+              "'1' or '8,16'. Overrides the default. (For the fork's exact max "
+              "per-tx gas use --transaction-gas-limit instead.)")
+@click.option("--transaction-gas-limit", type=int, default=None,
+              help="Raw per-tx gas limit (exact, not whole-millions) for "
+              "benchmark tests. Default for benchmark runs: the fork's per-tx "
+              "cap (2**24 = 16,777,216 on Osaka+), so the test tx lands on "
+              "exactly the max. Overrides --gas-benchmark-values.")
 @click.option("--gas-price", type=int, default=None,
               help="Legacy gas price in WEI (set on nets with ~0 fees).")
 @click.option("--max-fee-per-gas", type=int, default=None,
@@ -341,6 +351,7 @@ def submit_cmd(
     tx_wait_timeout: int,
     include_benchmark: bool,
     gas_benchmark_values: str | None,
+    transaction_gas_limit: int | None,
     gas_price: int | None,
     max_fee_per_gas: int | None,
     max_priority_fee_per_gas: int | None,
@@ -378,6 +389,7 @@ def submit_cmd(
         tx_wait_timeout=tx_wait_timeout,
         include_benchmark=include_benchmark,
         gas_benchmark_values=gas_benchmark_values,
+        transaction_gas_limit=transaction_gas_limit,
         gas_price=gas_price,
         max_fee_per_gas=max_fee_per_gas,
         max_priority_fee_per_gas=max_priority_fee_per_gas,
@@ -455,6 +467,9 @@ def _report_submit_result(result) -> None:
 @click.option("--tx-wait-timeout", type=int, default=120, show_default=True)
 @click.option("--include-benchmark", is_flag=True)
 @click.option("--gas-benchmark-values", default=None)
+@click.option("--transaction-gas-limit", type=int, default=None,
+              help="Raw per-tx gas limit for benchmark tests; defaults to the "
+              "fork's per-tx cap (2**24 on Osaka+).")
 @click.option("--max-fee-per-gas", type=int, default=None)
 @click.option("--max-priority-fee-per-gas", type=int, default=None)
 @click.option("-v", "--verbose", count=True)
@@ -473,6 +488,7 @@ def bloat_cmd(
     tx_wait_timeout: int,
     include_benchmark: bool,
     gas_benchmark_values: str | None,
+    transaction_gas_limit: int | None,
     max_fee_per_gas: int | None,
     max_priority_fee_per_gas: int | None,
     verbose: int,
@@ -516,6 +532,7 @@ def bloat_cmd(
             tx_wait_timeout=tx_wait_timeout,
             include_benchmark=include_benchmark,
             gas_benchmark_values=gas_benchmark_values,
+            transaction_gas_limit=transaction_gas_limit,
             max_fee_per_gas=max_fee_per_gas,
             max_priority_fee_per_gas=max_priority_fee_per_gas,
             # The bloated --dev chain is throwaway and the seed has 1M ETH, so

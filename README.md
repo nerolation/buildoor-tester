@@ -70,6 +70,14 @@ eest-replay submit \
   -k test_bal_nonce_changes \
   --fork Amsterdam --rpc http://127.0.0.1:8545 --chain-id 7928 \
   --seed-key 0x<funded-devnet-key> --csv ./submitted.csv
+
+# A max-gas benchmark tx: on Osaka the test tx is EXACTLY 2²⁴ = 16,777,216 gas
+# by default (no gas flag needed) — a loop-to-OOG benchmark saturating the cap
+eest-replay submit \
+  tests/benchmark/compute/instruction/test_keccak.py \
+  -k test_keccak_max_permutations --include-benchmark \
+  --fork Osaka --rpc <url> --chain-id <N> --seed-key 0x<funded-key> \
+  --max-fee-per-gas 4000000000 --max-priority-fee-per-gas 1000000000
 ```
 
 ### Requirements & notes
@@ -109,6 +117,14 @@ eest-replay submit \
   bug — prefer a devnet for broad runs.
 - Tests whose transactions can't be submitted standalone (e.g. unwrapped
   type-3 blob txs) are rejected by `execute` regardless of network.
+- **Max-gas benchmarks:** benchmark runs default the per-tx gas to the fork's
+  exact per-tx cap (`2²⁴ = 16,777,216` on Osaka+), so a single test tx
+  saturates the EIP-7825 limit with no extra flags. This covers both whole-
+  million `gas_benchmark_value` tests (e.g. `test_arithmetic`) and loop-to-OOG
+  tests whose `tx_gas_limit` fixture *is* the cap (e.g.
+  `test_keccak_max_permutations`). Override the exact gas with
+  `--transaction-gas-limit <raw>` or `--gas-benchmark-values <millions>`.
+  Validated on Sepolia: both emit a `16,777,216`-gas tx that gets included.
 - **Gas prices:** if the target RPC reports a zero priority fee (common on
   testnets), `execute` derives a max-fee of 0 and every tx is rejected below
   base fee. Pass explicit WEI values, e.g.
@@ -255,7 +271,8 @@ seq  from                  to                    note
 | `--specs-dir` | path to the execution-specs checkout (default `../execution-specs`) |
 | `--chain-id` | devnet chain id (default 7928) |
 | `--seed-key` | genesis-prefunded private key that funds the test (devnet only) |
-| `--include-benchmark` / `--gas-benchmark-values` | enable benchmark tests. `--gas-benchmark-values` is WHOLE millions and **defaults to the fork's max per-tx gas** (16 = 16M on Osaka+, the largest whole-million under the 2²⁴ EIP-7825 cap); pass a value to override (e.g. `1`). |
+| `--include-benchmark` | enable `tests/benchmark/` selection. |
+| `--transaction-gas-limit` / `--gas-benchmark-values` | per-tx gas for benchmark tests. Benchmark runs **default to the fork's exact per-tx cap** (`2²⁴ = 16,777,216` on Osaka+ via `--transaction-gas-limit`), so the test tx lands on exactly the max — including loop-to-OOG tests (e.g. `test_keccak_max_permutations`) whose `tx_gas_limit` fixture is the cap by construction. Override with `--transaction-gas-limit <raw gas>` (exact) or `--gas-benchmark-values <whole millions>` (e.g. `1`, `8,16`). On pre-Osaka forks (no cap) the default falls back to `--gas-benchmark-values 16`. |
 
 > [!NOTE]
 > The seed key is a **devnet test key** that is prefunded in the emitted

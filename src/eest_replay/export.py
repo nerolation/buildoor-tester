@@ -97,6 +97,7 @@ def export_transactions(
     tx_wait_timeout: int = 60,
     include_benchmark: bool = False,
     gas_benchmark_values: str | None = None,
+    transaction_gas_limit: int | None = None,
     k_filter: str | None = None,
 ) -> ExportResult:
     """Run one export and return its result."""
@@ -107,10 +108,10 @@ def export_transactions(
     if seed_addr is None:
         seed_addr = address_from_key(seed_key)
     # Benchmark runs default to the fork's max per-tx gas; overridable.
-    if gas_benchmark_values is None and _is_benchmark_run(
-        test_selector, include_benchmark
-    ):
-        gas_benchmark_values = default_gas_benchmark_values(fork)
+    gas_benchmark_values, transaction_gas_limit = _resolve_benchmark_gas(
+        fork, test_selector, include_benchmark,
+        gas_benchmark_values, transaction_gas_limit,
+    )
 
     genesis = build_devnet_genesis(
         fork=fork,
@@ -138,6 +139,7 @@ def export_transactions(
                 tx_wait_timeout=tx_wait_timeout,
                 include_benchmark=include_benchmark,
                 gas_benchmark_values=gas_benchmark_values,
+                transaction_gas_limit=transaction_gas_limit,
                 k_filter=k_filter,
             )
             raw_txs = recorder.snapshot()
@@ -218,6 +220,7 @@ def submit_transactions(
     tx_wait_timeout: int = 120,
     include_benchmark: bool = False,
     gas_benchmark_values: str | None = None,
+    transaction_gas_limit: int | None = None,
     gas_price: int | None = None,
     max_fee_per_gas: int | None = None,
     max_priority_fee_per_gas: int | None = None,
@@ -281,11 +284,11 @@ def submit_transactions(
     )
 
     # Benchmark runs default to the fork's max per-tx gas; --gas-benchmark-values
-    # overrides it.
-    if gas_benchmark_values is None and _is_benchmark_run(
-        test_selector, include_benchmark
-    ):
-        gas_benchmark_values = default_gas_benchmark_values(fork)
+    # / --transaction-gas-limit override it.
+    gas_benchmark_values, transaction_gas_limit = _resolve_benchmark_gas(
+        fork, test_selector, include_benchmark,
+        gas_benchmark_values, transaction_gas_limit,
+    )
     common = dict(
         specs_dir=specs_dir,
         test_selector=test_selector,
@@ -296,6 +299,7 @@ def submit_transactions(
         tx_wait_timeout=tx_wait_timeout,
         include_benchmark=include_benchmark,
         gas_benchmark_values=gas_benchmark_values,
+        transaction_gas_limit=transaction_gas_limit,
         k_filter=k_filter,
         gas_price=gas_price,
         max_fee_per_gas=max_fee_per_gas,
@@ -380,6 +384,7 @@ def _run_execute(
     jwt_path: Path | None = None,
     include_benchmark: bool = False,
     gas_benchmark_values: str | None = None,
+    transaction_gas_limit: int | None = None,
     k_filter: str | None = None,
     skip_cleanup: bool = True,
     gas_price: int | None = None,
@@ -420,6 +425,8 @@ def _run_execute(
         cmd.append("--include-benchmark")
     if gas_benchmark_values:
         cmd += ["--gas-benchmark-values", gas_benchmark_values]
+    if transaction_gas_limit is not None:
+        cmd += ["--transaction-gas-limit", str(transaction_gas_limit)]
     if k_filter:
         cmd += ["-k", k_filter]
     cmd.append(test_selector)
@@ -518,27 +525,73 @@ def address_from_key(priv_hex: str) -> str:
 FALLBACK_BENCHMARK_GAS_MILLIONS = 16
 
 
-def default_gas_benchmark_values(fork: str) -> str:
+def fork_tx_gas_cap(fork: str) -> int | None:
     """
-    Return the whole-millions gas-benchmark value targeting the fork's MAX tx
-    gas, as a string for ``--gas-benchmark-values``.
+    Return the fork's per-transaction gas cap, or None if it has none.
 
     From Osaka on, EIP-7825 caps a single transaction at 2**24 = 16,777,216
-    gas. ``--gas-benchmark-values`` is expressed in WHOLE millions
-    (``value * 1_000_000``), so exactly 2**24 isn't expressible and 17M would
-    exceed the cap and be rejected; we use ``floor(cap / 1_000_000)`` = 16,
-    i.e. 16,000,000 gas — the largest valid whole-million under the cap.
-    Forks without a per-tx cap fall back to a large default.
+    gas; pre-Osaka forks have no cap and return None.
     """
     try:
         import execution_testing.forks as forks_mod
 
         fork_cls = getattr(forks_mod, fork, None)
-        cap = fork_cls.transaction_gas_limit_cap() if fork_cls else None
+        return fork_cls.transaction_gas_limit_cap() if fork_cls else None
     except Exception:  # noqa: BLE001 - never let fork lookup break a run
-        cap = None
+        return None
+
+
+def default_gas_benchmark_values(fork: str) -> str:
+    """
+    Return the whole-millions gas-benchmark value targeting the fork's MAX tx
+    gas, as a string for ``--gas-benchmark-values``.
+
+    ``--gas-benchmark-values`` is expressed in WHOLE millions
+    (``value * 1_000_000``), so for a capped fork exactly 2**24 isn't
+    expressible and 17M would exceed the cap and be rejected; we use
+    ``floor(cap / 1_000_000)`` = 16, i.e. 16,000,000 gas. Forks without a
+    per-tx cap fall back to a large default.
+
+    NOTE: this whole-millions path is only the fallback for pre-cap forks. On
+    a capped fork (Osaka+) benchmark runs instead default ``--transaction-gas-
+    limit`` to the EXACT cap (see ``_resolve_benchmark_gas``), so the test tx
+    lands on exactly 2**24 rather than the 16M floor.
+    """
+    cap = fork_tx_gas_cap(fork)
     millions = (cap // 1_000_000) if cap else FALLBACK_BENCHMARK_GAS_MILLIONS
     return str(millions)
+
+
+def _resolve_benchmark_gas(
+    fork: str,
+    test_selector: str,
+    include_benchmark: bool,
+    gas_benchmark_values: str | None,
+    transaction_gas_limit: int | None,
+) -> tuple[str | None, int | None]:
+    """
+    Default a benchmark run's per-tx gas to the fork's MAX when the caller gave
+    no explicit gas override.
+
+    On a capped fork (Osaka+), default ``--transaction-gas-limit`` to the exact
+    per-tx cap (e.g. 2**24): EEST's ``tx_gas_limit`` fixture already returns the
+    cap there, and for whole-millions ``gas_benchmark_value`` tests this raises
+    the default block gas (and hence their gas budget) to the cap too — so both
+    test families emit a tx at exactly 2**24. On a pre-cap fork, fall back to
+    the whole-millions ``--gas-benchmark-values`` default. Explicit
+    ``gas_benchmark_values`` or ``transaction_gas_limit`` always win.
+    """
+    if (
+        gas_benchmark_values is None
+        and transaction_gas_limit is None
+        and _is_benchmark_run(test_selector, include_benchmark)
+    ):
+        cap = fork_tx_gas_cap(fork)
+        if cap is not None:
+            transaction_gas_limit = cap
+        else:
+            gas_benchmark_values = default_gas_benchmark_values(fork)
+    return gas_benchmark_values, transaction_gas_limit
 
 
 def _is_benchmark_run(test_selector: str, include_benchmark: bool) -> bool:
