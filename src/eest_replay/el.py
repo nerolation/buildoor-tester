@@ -158,6 +158,69 @@ def geth(
 el = geth
 
 
+@contextlib.contextmanager
+def geth_dev_datadir(
+    datadir: Path,
+    chain_id: int,
+    image: str = DEFAULT_IMAGE,
+    container_name: str | None = None,
+    dev_period: int = 1,
+    dev_gaslimit: int = 60_000_000,
+) -> Iterator[str]:
+    """
+    Boot geth in --dev mode against a PRE-BUILT datadir (e.g. from state-actor).
+
+    No ``geth init`` — the genesis block, chain config, and state root are
+    already embedded in the DB. geth ``--dev`` self-mines (PoA, ``dev_period``
+    second blocks), so no consensus layer is needed; the chain advances on its
+    own and includes mempool transactions. Yields the HTTP RPC URL; tears the
+    container down on exit.
+
+    ``datadir`` must be the directory that CONTAINS ``geth/chaindata`` (geth
+    appends ``geth/chaindata`` to ``--datadir``).
+    """
+    datadir = datadir.resolve()
+    if not (datadir / "geth" / "chaindata").is_dir():
+        raise FileNotFoundError(
+            f"{datadir} does not contain geth/chaindata — point --datadir at "
+            "the directory state-actor wrote (the parent of geth/chaindata)."
+        )
+    rpc_port = _free_port()
+    name = container_name or f"eest-bloat-{secrets.token_hex(4)}"
+    log_file = (datadir / "geth-dev.log").open("w")
+    proc = subprocess.Popen(
+        [
+            "docker", "run", "--rm",
+            "--name", name,
+            "-p", f"{rpc_port}:8545",
+            "-v", f"{datadir}:/data",
+            image,
+            "--datadir", "/data",
+            "--db.engine", "pebble",
+            "--networkid", str(chain_id),
+            "--dev", "--dev.period", str(dev_period),
+            "--dev.gaslimit", str(dev_gaslimit),
+            "--http", "--http.addr", "0.0.0.0", "--http.port", "8545",
+            "--http.api", "eth,net,web3,txpool,debug",
+            "--http.vhosts", "*",
+            "--rpc.allow-unprotected-txs",
+            "--datadir.minfreedisk", "0",
+        ],
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+    )
+    rpc_url = f"http://127.0.0.1:{rpc_port}"
+    try:
+        _wait_for_rpc(rpc_url)
+        yield rpc_url
+    finally:
+        subprocess.run(["docker", "stop", name], capture_output=True)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def _wait_for_rpc(rpc_url: str, timeout_s: float = 30.0) -> None:
     """Poll eth_chainId until reth responds or we time out."""
     body = json.dumps(

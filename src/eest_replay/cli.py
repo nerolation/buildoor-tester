@@ -10,6 +10,7 @@ from pathlib import Path
 
 import click
 
+from .el import geth_dev_datadir
 from .export import (
     DEFAULT_CHAIN_ID,
     DEFAULT_EOA_START,
@@ -20,6 +21,7 @@ from .export import (
 )
 from .fixture import discover_fixture_files, load_engine_fixtures
 from .report import BatchReport
+from .state_actor import run_state_actor
 from .runner import FixtureResult, replay
 
 
@@ -375,5 +377,126 @@ def submit_cmd(
     else:
         # Submission may still have happened — execute also verifies post-state,
         # which we don't require. Surface the outcome honestly.
+        click.echo(f"  execute did not pass: {result.error}")
+    sys.exit(0 if result.execute_ok else 1)
+
+
+@main.command("bloat")
+@click.argument("test_selector")
+@click.option("--fork", required=True,
+              help="Fork to run (e.g. Osaka). Also sets state-actor's genesis "
+              "fork when generating the datadir.")
+@click.option("--chain-id", type=int, default=1337, show_default=True,
+              help="Chain id (state-actor default is 1337).")
+@click.option(
+    "--state-actor",
+    "state_actor_bin",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to the state-actor binary. When set, generate a fresh bloated "
+    "datadir (prefunding the seed) before running.",
+)
+@click.option("--target-size", default="200MB", show_default=True,
+              help="Bloat size for state-actor generation (e.g. '5GB').")
+@click.option(
+    "--datadir",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Use an EXISTING state-actor geth datadir (parent of geth/chaindata) "
+    "instead of generating one. The seed must be funded in it.",
+)
+@click.option(
+    "--work-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Where to generate the datadir (default: a fresh tempdir).",
+)
+@click.option("--seed-key", default=DEFAULT_SEED_KEY,
+              help="Seed key; auto-prefunded in the generated bloated state.")
+@click.option(
+    "--specs-dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("../execution-specs"),
+    help="Path to the execution-specs checkout.",
+)
+@click.option("-k", "k_filter", default=None,
+              help="pytest -k filter passed through to `execute remote`.")
+@click.option("--csv", "csv_path", type=click.Path(path_type=Path), default=None,
+              help="Record every submitted transaction to this CSV.")
+@click.option("--tx-wait-timeout", type=int, default=120, show_default=True)
+@click.option("--include-benchmark", is_flag=True)
+@click.option("--gas-benchmark-values", default=None)
+@click.option("--max-fee-per-gas", type=int, default=None)
+@click.option("--max-priority-fee-per-gas", type=int, default=None)
+@click.option("-v", "--verbose", count=True)
+def bloat_cmd(
+    test_selector: str,
+    fork: str,
+    chain_id: int,
+    state_actor_bin: Path | None,
+    target_size: str,
+    datadir: Path | None,
+    work_dir: Path | None,
+    seed_key: str,
+    specs_dir: Path,
+    k_filter: str | None,
+    csv_path: Path | None,
+    tx_wait_timeout: int,
+    include_benchmark: bool,
+    gas_benchmark_values: str | None,
+    max_fee_per_gas: int | None,
+    max_priority_fee_per_gas: int | None,
+    verbose: int,
+) -> None:
+    """Run a spec test against a state-actor-bloated local chain.
+
+    Generates (or reuses) a bloated geth datadir, boots geth in --dev mode
+    against it (self-mining, no consensus layer), and submits the test's
+    transactions so they execute on top of the bloated state.
+    """
+    level = logging.WARNING - (verbose * 10)
+    logging.basicConfig(level=max(level, logging.DEBUG))
+
+    seed_addr = address_from_key(seed_key)
+
+    if datadir is None and state_actor_bin is None:
+        raise click.UsageError("pass --state-actor <bin> to generate a datadir, "
+                               "or --datadir <existing> to reuse one.")
+
+    if state_actor_bin is not None:
+        gen_dir = work_dir or Path(tempfile.mkdtemp(prefix="eest-bloat-"))
+        click.echo(f"=== generating bloated datadir (target {target_size}, "
+                   f"fork {fork}, chain {chain_id}, seed {seed_addr}) ...")
+        datadir = run_state_actor(
+            binary=state_actor_bin, db_dir=gen_dir, seed_addr=seed_addr,
+            chain_id=chain_id, fork=fork, target_size=target_size,
+        )
+        click.echo(f"    datadir: {datadir}")
+
+    click.echo(f"=== booting geth --dev on bloated state, submitting: {test_selector}")
+    with geth_dev_datadir(datadir, chain_id) as rpc_url:
+        result = submit_transactions(
+            test_selector=test_selector,
+            fork=fork,
+            rpc_url=rpc_url,
+            chain_id=chain_id,
+            specs_dir=specs_dir,
+            seed_key=seed_key,
+            k_filter=k_filter,
+            csv_path=csv_path,
+            tx_wait_timeout=tx_wait_timeout,
+            include_benchmark=include_benchmark,
+            gas_benchmark_values=gas_benchmark_values,
+            max_fee_per_gas=max_fee_per_gas,
+            max_priority_fee_per_gas=max_priority_fee_per_gas,
+        )
+
+    if result.submitted_count is not None:
+        click.echo(f"  submitted {result.submitted_count} transactions")
+        if result.csv_path:
+            click.echo(f"  csv: {result.csv_path}")
+    if result.execute_ok:
+        click.echo("  execute passed (txs included on the bloated state)")
+    else:
         click.echo(f"  execute did not pass: {result.error}")
     sys.exit(0 if result.execute_ok else 1)

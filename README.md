@@ -6,7 +6,7 @@ funding, the deterministic-deployment factory, contract deploys) — so a block
 builder like [buildoor](https://github.com/ethpandaops/buildoor) can put them
 in a block on a devnet.
 
-Three commands:
+Four commands:
 
 - **`eest-replay submit`** — the primary tool: submit a spec test's
   transactions directly to a live devnet/testnet RPC. The network's own
@@ -14,6 +14,10 @@ Three commands:
   sender, deploys the test's contracts, and broadcasts the test transactions
   into the mempool. Works against a long-living testnet or a local kurtosis
   devnet alike — no local node needed. Optional `--csv` records what was sent.
+- **`eest-replay bloat`** — run a spec test against a **state-actor-bloated**
+  local chain: generate (or reuse) a bloated geth datadir, boot geth `--dev`
+  on it (self-mining, no consensus layer), and submit the test's transactions
+  so they execute on top of the synthetic bloated state.
 - **`eest-replay export`** — for when there is **no** running network: boot a
   throwaway geth, materialize the same transaction sequence locally, and write
   it to a CSV plus a matching `genesis.json` a consumer can boot from.
@@ -100,6 +104,53 @@ eest-replay submit \
   gateways 403 the default urllib agent). Note that some read/load RPC
   gateways reject `eth_sendRawTransaction` outright (e.g. a canned
   "gas limit is too high" even for a 21000-gas tx) — point at a writable RPC.
+
+## `bloat`: run a spec test against a state-actor-bloated chain
+
+[state-actor](https://github.com/nerolation/state-actor) writes a
+**client-native geth datadir** with synthetic/bloated state and the genesis
+baked in — no `geth init`. `bloat` consumes that datadir: it boots geth in
+`--dev` mode against it (self-mining PoA, ~1s blocks, **no consensus layer**),
+then runs `submit` so the test's transactions execute on top of the bloated
+state.
+
+```
+# Generate the bloated datadir on the fly (auto-prefunds the seed) and run:
+eest-replay bloat <test-selector> --fork Osaka --chain-id 1337 \
+    --state-actor /path/to/state-actor --target-size 5GB
+
+# Or reuse a datadir you already generated with state-actor:
+eest-replay bloat <test-selector> --fork Osaka --chain-id 1337 \
+    --datadir /path/to/sa-geth
+```
+
+How it fits together:
+
+```
+state-actor --client=geth --db=<dir>/geth/chaindata          (bloated state +
+  --spec=<seed prefund> --target-size=NNN --fork=osaka         genesis baked in)
+                          │
+                          ▼
+   geth --dev --db.engine=pebble --datadir=<dir>   (self-mines on the datadir)
+                          │
+                          ▼
+   eest-replay submit … → execute funds/deploys/sends the test's txs → mined
+                          on top of the bloated state
+```
+
+- state-actor's production genesis alloc is always empty, so `bloat`
+  **auto-generates a one-entity `--spec`** prefunding the seed (from
+  `--seed-key`) — your seed is funded on the bloated chain out of the box.
+- `--state-actor <bin>` generates a fresh datadir (`--target-size` sizes the
+  bloat); `--datadir <dir>` reuses one (the seed must be funded in it).
+- The chain runs at `--chain-id` (state-actor default 1337) and `--fork`.
+
+> [!NOTE]
+> state-actor's genesis base fee is 1 gwei, and the `--dev` chain holds it
+> around ~0.01 gwei — so the same **EEST funding caveat** applies: tests that
+> fund their EOAs minimally can't pay real gas and their test tx is rejected
+> (it then polls until `--tx-wait-timeout`). Generously-funded tests run fine.
+> See the `submit` notes on base fee vs EEST funding.
 
 ## `export`: materialize transactions locally (no network)
 
@@ -202,13 +253,14 @@ seq  from                  to                    note
 buildoor-tester/
 ├── pyproject.toml             # uv project for the `eest-replay` CLI
 ├── src/eest_replay/
-│   ├── cli.py                 # `submit` + `export` + `run` subcommands
+│   ├── cli.py                 # `submit` + `bloat` + `export` + `run` subcommands
 │   ├── export.py              # submit/export: orchestrate EEST `execute remote`
+│   ├── state_actor.py         # drive state-actor: spec + bloated datadir (bloat)
 │   ├── rpc_proxy.py           # recording JSON-RPC proxy (tees sendRawTransaction)
 │   ├── devnet_genesis.py      # fresh devnet genesis for a target fork (export)
+│   ├── el.py                  # geth lifecycle: init+run, geth --dev on a datadir
 │   ├── fixture.py             # BlockchainEngineFixture loading + discovery
 │   ├── chainspec.py           # fixture.pre + genesis → geth genesis.json
-│   ├── el.py                  # throwaway geth lifecycle (Docker)
 │   ├── buildoor_client.py     # spawns `buildoor simbuild`, POSTs /build
 │   ├── runner.py              # replay: bootstrap → build → diff → advance
 │   └── report.py              # aggregate batch results to JSON/Markdown
