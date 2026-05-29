@@ -14,13 +14,18 @@ __pycache__/
 .vscode/
 
 # eest-replay outputs
-# Runner working directories (genesis.json / JWT / geth datadir / el.log live here).
+# Runner / export working directories (genesis.json / JWT / geth datadir /
+# el.log / transactions.csv live here).
 work-dir*/
 eest-replay-*/
+eest-export-*/
+export/
+out/
 **/el.log
 **/buildoor.log
 **/genesis.json
 **/jwt.hex
+**/transactions.csv
 
 # Generated reports — keep them out of version control by default.
 report.json

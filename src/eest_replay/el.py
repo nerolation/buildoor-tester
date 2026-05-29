@@ -126,6 +126,10 @@ def geth(
             # replay datadirs accumulate. We never persist much per fixture,
             # so disable the safety check.
             "--datadir.minfreedisk", "0",
+            # EEST's `execute` deploys the deterministic-deployment factory via
+            # Nick's keyless method, a pre-EIP-155 (unprotected) transaction.
+            # Allow it on this throwaway local node.
+            "--rpc.allow-unprotected-txs",
         ],
         stdout=log_file,
         stderr=subprocess.STDOUT,

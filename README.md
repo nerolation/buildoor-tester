@@ -1,15 +1,110 @@
 # buildoor-tester
 
-Replay Ethereum execution-spec test fixtures through
-[buildoor](https://github.com/ethpandaops/buildoor) and check that the blocks
-it builds match what the fixture expects.
+Turn [execution-spec](https://github.com/ethereum/execution-specs) tests into
+real, signed Ethereum transactions — including the setup they need (faucet
+funding, the deterministic-deployment factory, contract deploys) — so a block
+builder like [buildoor](https://github.com/ethpandaops/buildoor) can put them
+in a block on a devnet.
 
-Block-level Access List (EIP-7928) correctness tests and worst-case opcode
-saturation benchmarks live in the
-[execution-specs](https://github.com/ethereum/execution-specs) tree. This
-harness takes a filled fixture, boots a per-fixture geth EL with the fixture's
-exact genesis, drives the fixture's pre-signed transactions through buildoor's
-build pipeline, and diffs the produced payload against the expected one.
+Two commands:
+
+- **`eest-replay export`** — convert a spec test into a CSV of signed
+  transactions (setup first, then the test txs) plus a matching
+  `genesis.json`. This is the primary tool: it produces a portable,
+  replayable transaction script a builder can pick up later.
+- **`eest-replay run`** — the correctness oracle: replay a *filled* fixture
+  against a throwaway geth and diff the produced block (including the
+  EIP-7928 Block Access List) field-by-field against the fixture's expected
+  block. Optionally route the build through buildoor.
+
+## `export`: spec test → signed transactions
+
+```
+eest-replay export <test-selector> --fork <Fork> [-k <filter>] [--output dir]
+```
+
+```
+              ┌──────────────── eest-replay export ─────────────────┐
+              │  boot throwaway geth from a devnet genesis           │
+              │   (prefunds the EEST seed account)                  │
+              │  start a recording proxy in front of geth's RPC      │
+              │  run EEST `execute remote` against the proxy:        │
+              │    • fund the sender from the seed key               │
+              │    • deploy the deterministic CREATE2 factory        │
+              │    • deploy the test's contracts                     │
+              │    • send the test transactions                      │
+              │  capture every eth_sendRawTransaction, in order      │
+              │  enrich via eth_getTransactionByHash → write CSV     │
+              └──────────────────────────────────────────────────────┘
+                       │                         │
+                       ▼                         ▼
+                 transactions.csv          genesis.json + meta.json
+```
+
+`execute` does the hard part (funding math, live contract deployment with real
+on-chain addresses, signing). The proxy just tees the raw signed transactions
+to a CSV — because geth really executes everything, the captured sequence is
+correct and replayable against an EL booted from the emitted `genesis.json`.
+
+### Example
+
+```bash
+# A simple opcode test (Prague)
+eest-replay export \
+  'tests/frontier/opcodes/test_push.py::test_push[fork_Prague-state_test-PUSH1]' \
+  --fork Prague --output ./out/push
+
+# A Block Access List test (Amsterdam / EIP-7928)
+eest-replay export \
+  tests/amsterdam/eip7928_block_level_access_lists/test_block_access_lists.py \
+  -k test_bal_nonce_changes --fork Amsterdam --output ./out/bal
+
+# A worst-case benchmark transaction (Prague, 1M gas)
+eest-replay export \
+  tests/benchmark/compute/instruction/test_arithmetic.py \
+  -k "test_arithmetic and opcode_ADD and not ADDMOD" \
+  --fork Prague --include-benchmark --gas-benchmark-values 1 --output ./out/add
+```
+
+### Output
+
+| file | contents |
+|------|----------|
+| `transactions.csv` | one row per signed tx in submission order: `seq, block_number, tx_index, tx_hash, type, from, to, nonce, value, gas, gas_price, max_fee_per_gas, input_len, raw` |
+| `genesis.json`     | a geth/reth genesis activating all forks up to `--fork`, prefunding the seed account — boot an EL from this to replay the txs |
+| `meta.json`        | run parameters (fork, chain id, seed address, eoa-start) and replay notes |
+
+The `raw` column is the complete signed transaction. A consumer replays the
+CSV by submitting each `raw` in `seq` order to an EL booted from `genesis.json`
+(same chain id, seed prefunded). The leading rows are setup (deterministic
+factory, funding, contract deploys); the trailing rows are the test itself.
+
+Example (`test_bal_nonce_changes`, Amsterdam):
+
+```
+seq  from                  to                    note
+0    seed                  0x3fab18… (deployer)  fund the factory deployer
+1    0x3fab18…             (create)              deploy the CREATE2 factory
+2    seed                  0xc50d87… (alice)     fund the test sender EOA
+3    0xc50d87… (alice)     0x06e405… (bob)       the test transaction
+```
+
+### Key flags
+
+| flag | meaning |
+|------|---------|
+| `--fork` | fork the test targets; sets the devnet genesis (Prague, Amsterdam, …) |
+| `-k` | pytest `-k` filter passed through to `execute remote` |
+| `--output` | output directory (default `export/`) |
+| `--specs-dir` | path to the execution-specs checkout (default `../execution-specs`) |
+| `--chain-id` | devnet chain id (default 7928) |
+| `--seed-key` | genesis-prefunded private key that funds the test (devnet only) |
+| `--include-benchmark` / `--gas-benchmark-values` | enable benchmark tests |
+
+> [!NOTE]
+> The seed key is a **devnet test key** that is prefunded in the emitted
+> genesis. Never use a real key — these transactions assume a fresh devnet
+> starting from `genesis.json`.
 
 ## What's in the box
 
@@ -17,20 +112,28 @@ build pipeline, and diffs the produced payload against the expected one.
 buildoor-tester/
 ├── pyproject.toml             # uv project for the `eest-replay` CLI
 ├── src/eest_replay/
-│   ├── cli.py                 # `eest-replay run <fixture-or-dir>`
+│   ├── cli.py                 # `eest-replay export` + `eest-replay run`
+│   ├── export.py              # spec test → signed-tx CSV (orchestrates execute)
+│   ├── rpc_proxy.py           # recording JSON-RPC proxy (tees sendRawTransaction)
+│   ├── devnet_genesis.py      # fresh devnet genesis for a target fork
 │   ├── fixture.py             # BlockchainEngineFixture loading + discovery
 │   ├── chainspec.py           # fixture.pre + genesis → geth genesis.json
-│   ├── el.py                  # per-fixture geth lifecycle (Docker)
+│   ├── el.py                  # throwaway geth lifecycle (Docker)
 │   ├── buildoor_client.py     # spawns `buildoor simbuild`, POSTs /build
-│   ├── runner.py              # bootstrap → submit txs → build → diff → advance
+│   ├── runner.py              # replay: bootstrap → build → diff → advance
 │   └── report.py              # aggregate batch results to JSON/Markdown
 └── patches/
     ├── 01-engine-client-nullable-slotnumber.patch
-    ├── cmd_simbuild.go        # new buildoor subcommand
+    ├── cmd_simbuild.go        # new buildoor subcommand (used by `run`)
     └── README.md              # how to apply
 ```
 
-## Pipeline
+## `run`: fixture replay (correctness oracle)
+
+Where `export` produces transactions for a live builder, `run` is the
+field-by-field correctness check: it replays a *filled* fixture against a
+throwaway geth and diffs the produced block — including the BAL — against the
+fixture's expected block.
 
 ```
 just fill ...                  →  fixture JSON (one or many)

@@ -10,6 +10,13 @@ from pathlib import Path
 
 import click
 
+from .export import (
+    DEFAULT_CHAIN_ID,
+    DEFAULT_EOA_START,
+    DEFAULT_SEED_KEY,
+    address_from_key,
+    export_transactions,
+)
 from .fixture import discover_fixture_files, load_engine_fixtures
 from .report import BatchReport
 from .runner import FixtureResult, replay
@@ -17,7 +24,7 @@ from .runner import FixtureResult, replay
 
 @click.group()
 def main() -> None:
-    """Replay EEST fixtures against a per-fixture EL."""
+    """Turn EEST spec tests into transactions, and replay fixtures."""
 
 
 @main.command("run")
@@ -152,3 +159,101 @@ def _print_result(result: FixtureResult) -> None:
             click.echo(f"    - {m}")
     if not result.blocks:
         click.echo("  (no blocks)")
+
+
+@main.command("export")
+@click.argument("test_selector")
+@click.option(
+    "--fork",
+    required=True,
+    help="Fork the test targets (e.g. Prague, Amsterdam). Must match the "
+    "live network's active fork; here it sets the devnet genesis.",
+)
+@click.option(
+    "--output",
+    "output_dir",
+    type=click.Path(path_type=Path),
+    default=Path("export"),
+    help="Directory for transactions.csv, genesis.json, meta.json.",
+)
+@click.option(
+    "--specs-dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("../execution-specs"),
+    help="Path to the execution-specs checkout (provides `execute` + tests).",
+)
+@click.option(
+    "--work-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Scratch dir for the throwaway geth (default: a fresh tempdir).",
+)
+@click.option("--chain-id", type=int, default=DEFAULT_CHAIN_ID, show_default=True)
+@click.option(
+    "--seed-key",
+    default=DEFAULT_SEED_KEY,
+    help="Genesis-prefunded private key that funds the test (devnet only).",
+)
+@click.option("--eoa-start", default=DEFAULT_EOA_START, show_default=True,
+              help="Fixed EOA derivation start for reproducible sequences.")
+@click.option("--tx-wait-timeout", type=int, default=60, show_default=True)
+@click.option("--include-benchmark", is_flag=True,
+              help="Allow tests/benchmark/ selection.")
+@click.option("--gas-benchmark-values", default=None,
+              help="Gas limits in millions for benchmark tests, e.g. '1'.")
+@click.option("-k", "k_filter", default=None,
+              help="pytest -k filter passed through to `execute remote`.")
+@click.option("-v", "--verbose", count=True)
+def export_cmd(
+    test_selector: str,
+    fork: str,
+    output_dir: Path,
+    specs_dir: Path,
+    work_dir: Path | None,
+    chain_id: int,
+    seed_key: str,
+    eoa_start: str,
+    tx_wait_timeout: int,
+    include_benchmark: bool,
+    gas_benchmark_values: str | None,
+    k_filter: str | None,
+    verbose: int,
+) -> None:
+    """Convert a spec test into a CSV of signed transactions (setup + test).
+
+    TEST_SELECTOR is a pytest selector understood by `execute remote`, e.g.
+    'tests/frontier/opcodes/test_push.py::test_push[fork_Prague-state_test-PUSH1]'
+    or a path plus -k. Setup transactions (deterministic factory, funding,
+    contract deploys) are captured first, then the test transactions.
+    """
+    level = logging.WARNING - (verbose * 10)
+    logging.basicConfig(level=max(level, logging.DEBUG))
+
+    seed_addr = address_from_key(seed_key)
+    scratch = work_dir or Path(tempfile.mkdtemp(prefix="eest-export-"))
+
+    click.echo(f"=== exporting: {test_selector}")
+    click.echo(f"    fork={fork} chain_id={chain_id} seed={seed_addr}")
+    result = export_transactions(
+        test_selector=test_selector,
+        fork=fork,
+        output_dir=output_dir,
+        specs_dir=specs_dir,
+        work_dir=scratch,
+        chain_id=chain_id,
+        seed_key=seed_key,
+        seed_addr=seed_addr,
+        eoa_start=eoa_start,
+        tx_wait_timeout=tx_wait_timeout,
+        include_benchmark=include_benchmark,
+        gas_benchmark_values=gas_benchmark_values,
+        k_filter=k_filter,
+    )
+
+    if not result.execute_ok:
+        click.echo(f"  execute did not pass: {result.error}")
+    click.echo(f"  captured {result.tx_count} transactions")
+    click.echo(f"  csv:     {result.csv_path}")
+    click.echo(f"  genesis: {result.genesis_path}")
+    click.echo(f"  meta:    {result.meta_path}")
+    sys.exit(0 if result.execute_ok and result.tx_count > 0 else 1)
