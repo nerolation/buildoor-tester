@@ -25,6 +25,9 @@ Four commands:
   against a throwaway geth and diff the produced block (including the
   EIP-7928 Block Access List) field-by-field against the fixture's expected
   block. Optionally route the build through buildoor.
+- **`eest-replay recover`** — reclaim seed ETH left in per-test EOAs: re-derive
+  the funded accounts from a run's recovery sidecar (or `--eoa-start`/`--key`)
+  and sweep their balances back to an address.
 
 ## `submit`: run a spec test against a devnet/testnet
 
@@ -85,6 +88,18 @@ eest-replay submit \
 - `--eoa-start` defaults to a **random** value per run, so repeated/batched
   submits never reuse an ephemeral EOA (a reused EOA carries a stale nonce →
   its test tx is rejected). Pass an explicit value only for reproducibility.
+- **Spending safeguards (protect seed ETH):**
+  - `--cleanup` (default **on**) runs EEST's refund phase so the funded test
+    EOAs return their balance to the seed — net spend is then just gas. Use
+    `--no-cleanup` to leave the ETH in the EOAs.
+  - `--min-seed-balance <ETH>` aborts *before* running if the seed is below the
+    floor, so a near-empty account is never drained.
+  - every run prints the **seed spend** and writes a **recovery sidecar**
+    (`<csv>.recovery.json`, or `--meta-out`) recording the `eoa-start`. Even
+    after `--no-cleanup`, reclaim the funds later with
+    `eest-replay recover --meta <sidecar> --to <addr> --rpc <url> --chain-id <N>`
+    (it re-derives the funded EOAs — `key = int(eoa-start) + i` — and sweeps
+    any holding more than the sweep gas cost).
 - **Base fee vs EEST funding:** EEST funds each test's EOAs assuming a
   near-zero gas price. On a low-base-fee devnet (e.g. kurtosis, where buildoor
   runs) the whole test corpus submits smoothly. On a busy public testnet

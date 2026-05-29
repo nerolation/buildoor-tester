@@ -35,6 +35,7 @@ from execution_testing.base_types import Bytes
 from .devnet_genesis import DEFAULT_PREFUND_WEI, build_devnet_genesis
 from .el import geth
 from .rpc_proxy import DEFAULT_USER_AGENT, recording_proxy, split_basic_auth
+from .sweep import get_balance
 
 # Devnet seed key (genesis-prefunded). Matches buildoor's devnet wallet key so
 # the emitted genesis is consistent with buildoor's .hack/devnet conventions.
@@ -200,6 +201,8 @@ class SubmitResult:
     submitted_count: int | None  # None when not recorded (no --csv)
     csv_path: Path | None = None
     error: str | None = None
+    spent_wei: int | None = None  # seed balance delta over the run
+    meta_path: Path | None = None  # recovery sidecar (records eoa_start)
 
 
 def submit_transactions(
@@ -218,6 +221,9 @@ def submit_transactions(
     gas_price: int | None = None,
     max_fee_per_gas: int | None = None,
     max_priority_fee_per_gas: int | None = None,
+    cleanup: bool = True,
+    min_seed_balance_wei: int | None = None,
+    meta_path: Path | None = None,
 ) -> SubmitResult:
     """
     Submit a spec test's transactions to a live devnet/testnet RPC.
@@ -232,12 +238,48 @@ def submit_transactions(
     EOA (a reused EOA carries a stale nonce → the test tx is rejected). Pass an
     explicit value only when you need reproducible EOA addresses.
 
+    Safeguards (protect seed ETH):
+    - ``min_seed_balance_wei``: pre-flight floor — abort before running if the
+      seed holds less than this, so a near-empty account is never drained.
+    - ``cleanup`` (default True): run EEST's refund phase so the funded test
+      EOAs return their balance to the seed — net spend is then just gas.
+    - the recovery sidecar (always written) records ``eoa_start`` so the funded
+      EOAs can be re-derived and swept later even if cleanup is skipped.
+
     Pass explicit gas prices (wei) on networks where the RPC reports a zero
     priority fee — otherwise execute derives a max-fee of 0 and the txs are
     rejected below the base fee.
     """
     if eoa_start is None:
         eoa_start = random_eoa_start()
+    seed_addr = address_from_key(seed_key)
+
+    # Pre-flight spend guard: don't even start if the seed is below the floor.
+    try:
+        balance_before: int | None = get_balance(rpc_url, seed_addr)
+    except Exception:  # noqa: BLE001 - balance is advisory; don't block on RPC hiccup
+        balance_before = None
+    if (
+        min_seed_balance_wei is not None
+        and balance_before is not None
+        and balance_before < min_seed_balance_wei
+    ):
+        return SubmitResult(
+            test_selector=test_selector, fork=fork, chain_id=chain_id,
+            rpc_url=rpc_url, execute_ok=False, submitted_count=None,
+            csv_path=csv_path,
+            error=(
+                f"aborted: seed {seed_addr} balance "
+                f"{balance_before / 10**18:.6f} ETH is below the "
+                f"--min-seed-balance floor of {min_seed_balance_wei / 10**18:.6f} ETH"
+            ),
+        )
+
+    # Always record how to recover the funded EOAs (key = eoa_start + i).
+    written_meta = _write_recovery_meta(
+        meta_path, csv_path, seed_addr, eoa_start, chain_id, fork, rpc_url
+    )
+
     # Benchmark runs default to the fork's max per-tx gas; --gas-benchmark-values
     # overrides it.
     if gas_benchmark_values is None and _is_benchmark_run(
@@ -258,6 +300,7 @@ def submit_transactions(
         gas_price=gas_price,
         max_fee_per_gas=max_fee_per_gas,
         max_priority_fee_per_gas=max_priority_fee_per_gas,
+        skip_cleanup=not cleanup,
     )
 
     if csv_path is not None:
@@ -272,6 +315,13 @@ def submit_transactions(
         execute_ok, err = _run_execute(rpc_url=rpc_url, **common)
         count = None
 
+    spent: int | None = None
+    if balance_before is not None:
+        try:
+            spent = balance_before - get_balance(rpc_url, seed_addr)
+        except Exception:  # noqa: BLE001
+            spent = None
+
     return SubmitResult(
         test_selector=test_selector,
         fork=fork,
@@ -281,7 +331,39 @@ def submit_transactions(
         submitted_count=count,
         csv_path=csv_path,
         error=err,
+        spent_wei=spent,
+        meta_path=written_meta,
     )
+
+
+def _write_recovery_meta(
+    meta_path: Path | None,
+    csv_path: Path | None,
+    seed_addr: str,
+    eoa_start: str,
+    chain_id: int,
+    fork: str,
+    rpc_url: str,
+) -> Path | None:
+    """Write a sidecar recording eoa_start so funded EOAs can be recovered."""
+    if meta_path is None:
+        if csv_path is not None:
+            meta_path = csv_path.with_suffix(".recovery.json")
+        else:
+            return None  # nowhere obvious to put it; caller can pass --meta-out
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(json.dumps({
+        "seed_address": seed_addr,
+        "eoa_start": eoa_start,
+        "chain_id": chain_id,
+        "fork": fork,
+        "rpc_url": rpc_url,
+        "note": (
+            "EEST funded per-test EOAs with key = int(eoa_start) + i. To reclaim "
+            "their balances: eest-replay recover --meta this-file --to <addr>."
+        ),
+    }, indent=2))
+    return meta_path
 
 
 def _run_execute(

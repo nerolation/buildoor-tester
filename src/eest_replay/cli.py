@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import tempfile
@@ -22,6 +23,7 @@ from .export import (
 from .fixture import discover_fixture_files, load_engine_fixtures
 from .report import BatchReport
 from .state_actor import run_state_actor
+from .sweep import recover_funded_eoas, sweep_account
 from .runner import FixtureResult, replay
 
 
@@ -315,6 +317,16 @@ def export_cmd(
               "base fee. e.g. 5000000000 (5 gwei).")
 @click.option("--max-priority-fee-per-gas", type=int, default=None,
               help="EIP-1559 max priority fee per gas in WEI, e.g. 1000000000.")
+@click.option("--cleanup/--no-cleanup", default=True, show_default=True,
+              help="Refund the funded test EOAs back to the seed after the "
+              "test (reclaims funding; net spend ≈ gas). --no-cleanup leaves "
+              "the ETH in the EOAs — recoverable later via `recover`.")
+@click.option("--min-seed-balance", type=float, default=None,
+              help="Safeguard: abort before running if the seed holds fewer "
+              "than this many ETH (don't drain a low account).")
+@click.option("--meta-out", type=click.Path(path_type=Path), default=None,
+              help="Where to write the recovery sidecar (records eoa-start). "
+              "Defaults next to --csv.")
 @click.option("-v", "--verbose", count=True)
 def submit_cmd(
     test_selector: str,
@@ -332,6 +344,9 @@ def submit_cmd(
     gas_price: int | None,
     max_fee_per_gas: int | None,
     max_priority_fee_per_gas: int | None,
+    cleanup: bool,
+    min_seed_balance: float | None,
+    meta_out: Path | None,
     verbose: int,
 ) -> None:
     """Submit a spec test's transactions to a live devnet/testnet.
@@ -366,19 +381,33 @@ def submit_cmd(
         gas_price=gas_price,
         max_fee_per_gas=max_fee_per_gas,
         max_priority_fee_per_gas=max_priority_fee_per_gas,
+        cleanup=cleanup,
+        min_seed_balance_wei=(
+            int(min_seed_balance * 10**18) if min_seed_balance is not None else None
+        ),
+        meta_path=meta_out,
     )
+    _report_submit_result(result)
+    sys.exit(0 if result.execute_ok else 1)
 
+
+def _report_submit_result(result) -> None:
+    """Print a SubmitResult: counts, spend, recovery sidecar, pass/fail."""
     if result.submitted_count is not None:
         click.echo(f"  submitted {result.submitted_count} transactions")
         if result.csv_path:
             click.echo(f"  csv: {result.csv_path}")
+    if result.spent_wei is not None:
+        click.echo(f"  seed spent: {result.spent_wei / 10**18:.6f} ETH")
+    if result.meta_path is not None:
+        click.echo(f"  recovery sidecar: {result.meta_path} "
+                   "(run `eest-replay recover --meta <it> --to <addr>`)")
     if result.execute_ok:
         click.echo("  execute passed (txs included on-chain)")
     else:
         # Submission may still have happened — execute also verifies post-state,
         # which we don't require. Surface the outcome honestly.
         click.echo(f"  execute did not pass: {result.error}")
-    sys.exit(0 if result.execute_ok else 1)
 
 
 @main.command("bloat")
@@ -489,14 +518,81 @@ def bloat_cmd(
             gas_benchmark_values=gas_benchmark_values,
             max_fee_per_gas=max_fee_per_gas,
             max_priority_fee_per_gas=max_priority_fee_per_gas,
+            # The bloated --dev chain is throwaway and the seed has 1M ETH, so
+            # there's nothing to reclaim — skip the refund phase.
+            cleanup=False,
         )
 
-    if result.submitted_count is not None:
-        click.echo(f"  submitted {result.submitted_count} transactions")
-        if result.csv_path:
-            click.echo(f"  csv: {result.csv_path}")
-    if result.execute_ok:
-        click.echo("  execute passed (txs included on the bloated state)")
-    else:
-        click.echo(f"  execute did not pass: {result.error}")
+    _report_submit_result(result)
     sys.exit(0 if result.execute_ok else 1)
+
+
+@main.command("recover")
+@click.option("--rpc", "rpc_url", required=True,
+              help="RPC endpoint of the network to sweep on.")
+@click.option("--to", "to_addr", required=True,
+              help="Address to sweep recovered ETH into (e.g. your new seed).")
+@click.option("--chain-id", type=int, required=True)
+@click.option("--meta", type=click.Path(exists=True, path_type=Path), default=None,
+              help="A recovery sidecar (.recovery.json) written by submit; "
+              "reads eoa-start from it.")
+@click.option("--eoa-start", default=None,
+              help="EOA derivation start to recover from (alternative to --meta).")
+@click.option("--key", default=None,
+              help="Sweep a single account by its private key (hex).")
+@click.option("--count", type=int, default=64, show_default=True,
+              help="How many derived EOAs to scan from eoa-start.")
+@click.option("--max-fee-per-gas", type=int, default=5_000_000_000, show_default=True)
+@click.option("--max-priority-fee-per-gas", type=int, default=1_000_000_000,
+              show_default=True)
+@click.option("-v", "--verbose", count=True)
+def recover_cmd(
+    rpc_url: str,
+    to_addr: str,
+    chain_id: int,
+    meta: Path | None,
+    eoa_start: str | None,
+    key: str | None,
+    count: int,
+    max_fee_per_gas: int,
+    max_priority_fee_per_gas: int,
+    verbose: int,
+) -> None:
+    """Sweep ETH from test EOAs (or a single key) back to an address.
+
+    Reclaims ETH the funding phase left in per-test EOAs. Point it at a
+    recovery sidecar (--meta) or give --eoa-start; EEST derived the EOAs as
+    key = int(eoa-start) + i, so this scans --count keys and sweeps any that
+    hold a balance. Use --key to sweep one specific account.
+    """
+    level = logging.WARNING - (verbose * 10)
+    logging.basicConfig(level=max(level, logging.DEBUG))
+
+    if key is not None:
+        result = sweep_account(
+            rpc_url, int(key, 16), to_addr, chain_id,
+            max_fee_per_gas=max_fee_per_gas,
+            max_priority_fee_per_gas=max_priority_fee_per_gas,
+        )
+        if result is None:
+            click.echo("  nothing to sweep (balance below gas reserve)")
+            sys.exit(0)
+        tx_hash, swept = result
+        click.echo(f"  swept {swept / 10**18:.6f} ETH → {to_addr}  tx={tx_hash}")
+        sys.exit(0)
+
+    if eoa_start is None:
+        if meta is None:
+            raise click.UsageError("pass --meta <sidecar>, --eoa-start, or --key.")
+        eoa_start = json.loads(meta.read_text())["eoa_start"]
+
+    click.echo(f"=== recovering up to {count} EOAs from eoa-start → {to_addr}")
+    recovered = recover_funded_eoas(
+        rpc_url, int(eoa_start), to_addr, chain_id, count=count,
+        max_fee_per_gas=max_fee_per_gas,
+        max_priority_fee_per_gas=max_priority_fee_per_gas,
+    )
+    total = sum(r.swept_wei for r in recovered)
+    for r in recovered:
+        click.echo(f"  {r.address}: {r.swept_wei / 10**18:.6f} ETH  tx={r.tx_hash}")
+    click.echo(f"  recovered {len(recovered)} accounts, {total / 10**18:.6f} ETH total")
