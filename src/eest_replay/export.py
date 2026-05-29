@@ -204,7 +204,7 @@ def submit_transactions(
     chain_id: int,
     specs_dir: Path,
     seed_key: str = DEFAULT_SEED_KEY,
-    eoa_start: str = DEFAULT_EOA_START,
+    eoa_start: str | None = None,
     k_filter: str | None = None,
     csv_path: Path | None = None,
     tx_wait_timeout: int = 120,
@@ -222,10 +222,17 @@ def submit_transactions(
     polls for inclusion. ``seed_key`` must be funded on the target network.
     When ``csv_path`` is given, every submitted transaction is also recorded.
 
+    ``eoa_start`` seeds the ephemeral EOA keys each test allocates. It defaults
+    to a RANDOM value per invocation so repeated/batched submits never reuse an
+    EOA (a reused EOA carries a stale nonce → the test tx is rejected). Pass an
+    explicit value only when you need reproducible EOA addresses.
+
     Pass explicit gas prices (wei) on networks where the RPC reports a zero
     priority fee — otherwise execute derives a max-fee of 0 and the txs are
     rejected below the base fee.
     """
+    if eoa_start is None:
+        eoa_start = random_eoa_start()
     common = dict(
         specs_dir=specs_dir,
         test_selector=test_selector,
@@ -411,6 +418,19 @@ def _get_tx(rpc_url: str, tx_hash: str) -> Dict[str, Any] | None:
 def address_from_key(priv_hex: str) -> str:
     """Derive the lowercase 0x address for a private key."""
     return str(EOA(key=int(priv_hex, 16)))
+
+
+def random_eoa_start() -> str:
+    """
+    Return a random EOA derivation start (decimal int string).
+
+    240 random bits keeps it well below the secp256k1 order while leaving room
+    for the per-test offsets execute adds. Used so independent submits don't
+    derive the same ephemeral EOAs (which would carry stale nonces).
+    """
+    import secrets
+
+    return str(secrets.randbits(240) + 2**16)
 
 
 def _to_int(hex_or_none: Any) -> int | None:

@@ -290,9 +290,9 @@ def export_cmd(
     default=None,
     help="Also record every submitted transaction to this CSV.",
 )
-@click.option("--eoa-start", default=DEFAULT_EOA_START, show_default=False,
-              help="EOA derivation start (override to avoid collisions on a "
-              "shared network).")
+@click.option("--eoa-start", default=None,
+              help="EOA derivation start (default: random per run, so repeated "
+              "submits never reuse an ephemeral EOA). Set for reproducibility.")
 @click.option("--tx-wait-timeout", type=int, default=120, show_default=True,
               help="Max seconds to wait for each tx to be included.")
 @click.option("--include-benchmark", is_flag=True,

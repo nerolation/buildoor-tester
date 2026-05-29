@@ -78,8 +78,18 @@ eest-replay submit \
   additionally verifies post-state and will report failure on a mismatch even
   though the txs were still broadcast. With `--csv` the recorded rows are the
   ground truth of what went on-chain.
-- On a shared network, override `--eoa-start` per caller so ephemeral EOA keys
-  don't collide with another run.
+- `--eoa-start` defaults to a **random** value per run, so repeated/batched
+  submits never reuse an ephemeral EOA (a reused EOA carries a stale nonce →
+  its test tx is rejected). Pass an explicit value only for reproducibility.
+- **Base fee vs EEST funding:** EEST funds each test's EOAs assuming a
+  near-zero gas price. On a low-base-fee devnet (e.g. kurtosis, where buildoor
+  runs) the whole test corpus submits smoothly. On a busy public testnet
+  (Sepolia ~1–2 gwei base fee) only tests that fund their senders generously
+  succeed; minimally-funded tests hit "insufficient funds" once gas is priced
+  to clear the base fee. This is an EEST-on-real-network property, not a tool
+  bug — prefer a devnet for broad runs.
+- Tests whose transactions can't be submitted standalone (e.g. unwrapped
+  type-3 blob txs) are rejected by `execute` regardless of network.
 - **Gas prices:** if the target RPC reports a zero priority fee (common on
   testnets), `execute` derives a max-fee of 0 and every tx is rejected below
   base fee. Pass explicit WEI values, e.g.
