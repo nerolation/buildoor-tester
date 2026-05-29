@@ -1,16 +1,19 @@
-"""Convert spec tests into a CSV of signed transactions (setup + test).
+"""Turn spec tests into real transactions and get them onto a chain.
 
-Pipeline per run:
-  1. boot a throwaway geth from a fresh devnet genesis (prefunding the seed)
-  2. put a recording proxy in front of geth's JSON-RPC
-  3. run EEST `execute remote` against the proxy (engine-driven block building)
-     — execute funds the sender, deploys the deterministic factory, deploys the
-     test's contracts, and sends the test transactions, all as real signed txs
-  4. capture every eth_sendRawTransaction in submission order
-  5. enrich each via eth_getTransactionByHash and write a CSV + genesis + meta
+Two entry points, both built on EEST `execute remote` (which funds a sender,
+deploys the deterministic factory, deploys the test's contracts, and sends the
+test transactions as real signed txs):
 
-The emitted genesis.json lets a downstream consumer (buildoor) boot a
-compatible EL and replay transactions.csv to reproduce the exact state.
+- ``submit_transactions`` — submit a test's transactions directly to a live
+  devnet/testnet RPC where blocks are already produced (by the network's
+  validators + a builder like buildoor). No local EL. Optionally tees every
+  submitted transaction to a CSV via a recording proxy. This is the primary
+  path for "run an EEST test against a devnet."
+
+- ``export_transactions`` — for when there is NO running network: boot a
+  throwaway geth from a generated genesis, drive block production via the
+  Engine API, capture the transactions to a CSV, and emit the genesis so a
+  consumer can boot a compatible EL and replay them.
 """
 
 from __future__ import annotations
@@ -180,6 +183,79 @@ def export_transactions(
     )
 
 
+@dataclass
+class SubmitResult:
+    """Outcome of submitting a test's transactions to a live network."""
+
+    test_selector: str
+    fork: str
+    chain_id: int
+    rpc_url: str
+    execute_ok: bool
+    submitted_count: int | None  # None when not recorded (no --csv)
+    csv_path: Path | None = None
+    error: str | None = None
+
+
+def submit_transactions(
+    test_selector: str,
+    fork: str,
+    rpc_url: str,
+    chain_id: int,
+    specs_dir: Path,
+    seed_key: str = DEFAULT_SEED_KEY,
+    eoa_start: str = DEFAULT_EOA_START,
+    k_filter: str | None = None,
+    csv_path: Path | None = None,
+    tx_wait_timeout: int = 120,
+    include_benchmark: bool = False,
+    gas_benchmark_values: str | None = None,
+) -> SubmitResult:
+    """
+    Submit a spec test's transactions to a live devnet/testnet RPC.
+
+    The target network must already produce blocks (validators + builder), so
+    no Engine API / local EL is involved — execute just broadcasts the txs and
+    polls for inclusion. ``seed_key`` must be funded on the target network.
+    When ``csv_path`` is given, every submitted transaction is also recorded.
+    """
+    common = dict(
+        specs_dir=specs_dir,
+        test_selector=test_selector,
+        fork=fork,
+        chain_id=chain_id,
+        seed_key=seed_key,
+        eoa_start=eoa_start,
+        tx_wait_timeout=tx_wait_timeout,
+        include_benchmark=include_benchmark,
+        gas_benchmark_values=gas_benchmark_values,
+        k_filter=k_filter,
+    )
+
+    if csv_path is not None:
+        with recording_proxy(rpc_url) as (proxy_url, recorder):
+            execute_ok, err = _run_execute(rpc_url=proxy_url, **common)
+            raw_txs = recorder.snapshot()
+        rows = _enrich(raw_txs, rpc_url)
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_csv(csv_path, rows)
+        count: int | None = len(rows)
+    else:
+        execute_ok, err = _run_execute(rpc_url=rpc_url, **common)
+        count = None
+
+    return SubmitResult(
+        test_selector=test_selector,
+        fork=fork,
+        chain_id=chain_id,
+        rpc_url=rpc_url,
+        execute_ok=execute_ok,
+        submitted_count=count,
+        csv_path=csv_path,
+        error=err,
+    )
+
+
 def _run_execute(
     *,
     specs_dir: Path,
@@ -189,27 +265,37 @@ def _run_execute(
     seed_key: str,
     eoa_start: str,
     rpc_url: str,
-    engine_url: str,
-    jwt_path: Path,
     tx_wait_timeout: int,
-    include_benchmark: bool,
-    gas_benchmark_values: str | None,
-    k_filter: str | None,
+    engine_url: str | None = None,
+    jwt_path: Path | None = None,
+    include_benchmark: bool = False,
+    gas_benchmark_values: str | None = None,
+    k_filter: str | None = None,
+    skip_cleanup: bool = True,
 ) -> tuple[bool, str | None]:
-    """Invoke `execute remote` in the execution-specs venv as a subprocess."""
+    """Invoke `execute remote` in the execution-specs venv as a subprocess.
+
+    When ``engine_url`` is set, EEST drives block production itself via the
+    Engine API (needed against an isolated EL with no consensus layer). When
+    it is None, blocks are produced by the target network (a live testnet or a
+    kurtosis devnet) and execute merely submits and polls for inclusion.
+    """
     cmd = [
         "uv", "run", "execute", "remote",
         "--fork", fork,
         "--rpc-endpoint", rpc_url,
-        "--engine-endpoint", engine_url,
-        "--engine-jwt-secret-file", str(jwt_path),
         "--chain-id", str(chain_id),
         "--rpc-seed-key", seed_key,
         "--eoa-start", eoa_start,
         "--tx-wait-timeout", str(tx_wait_timeout),
-        "--skip-cleanup",
         "-p", "no:randomly",
     ]
+    if engine_url is not None:
+        cmd += ["--engine-endpoint", engine_url]
+        if jwt_path is not None:
+            cmd += ["--engine-jwt-secret-file", str(jwt_path)]
+    if skip_cleanup:
+        cmd.append("--skip-cleanup")
     if include_benchmark:
         cmd.append("--include-benchmark")
     if gas_benchmark_values:

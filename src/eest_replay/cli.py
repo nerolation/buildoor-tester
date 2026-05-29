@@ -16,6 +16,7 @@ from .export import (
     DEFAULT_SEED_KEY,
     address_from_key,
     export_transactions,
+    submit_transactions,
 )
 from .fixture import discover_fixture_files, load_engine_fixtures
 from .report import BatchReport
@@ -257,3 +258,102 @@ def export_cmd(
     click.echo(f"  genesis: {result.genesis_path}")
     click.echo(f"  meta:    {result.meta_path}")
     sys.exit(0 if result.execute_ok and result.tx_count > 0 else 1)
+
+
+@main.command("submit")
+@click.argument("test_selector")
+@click.option("--fork", required=True,
+              help="Fork the target network is on (e.g. Prague, Amsterdam).")
+@click.option("--rpc", "rpc_url", required=True,
+              help="Target devnet/testnet EL JSON-RPC endpoint.")
+@click.option("--chain-id", type=int, required=True,
+              help="Chain id of the target network (cross-checked vs the RPC).")
+@click.option(
+    "--seed-key",
+    default=DEFAULT_SEED_KEY,
+    help="Private key FUNDED ON THE TARGET NETWORK that funds the test. "
+    "The default is only prefunded on local devnets; pass your own for a "
+    "testnet.",
+)
+@click.option(
+    "--specs-dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("../execution-specs"),
+    help="Path to the execution-specs checkout (provides `execute` + tests).",
+)
+@click.option("-k", "k_filter", default=None,
+              help="pytest -k filter passed through to `execute remote`.")
+@click.option(
+    "--csv",
+    "csv_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Also record every submitted transaction to this CSV.",
+)
+@click.option("--eoa-start", default=DEFAULT_EOA_START, show_default=False,
+              help="EOA derivation start (override to avoid collisions on a "
+              "shared network).")
+@click.option("--tx-wait-timeout", type=int, default=120, show_default=True,
+              help="Max seconds to wait for each tx to be included.")
+@click.option("--include-benchmark", is_flag=True,
+              help="Allow tests/benchmark/ selection.")
+@click.option("--gas-benchmark-values", default=None,
+              help="Gas limits in millions for benchmark tests, e.g. '1'.")
+@click.option("-v", "--verbose", count=True)
+def submit_cmd(
+    test_selector: str,
+    fork: str,
+    rpc_url: str,
+    chain_id: int,
+    seed_key: str,
+    specs_dir: Path,
+    k_filter: str | None,
+    csv_path: Path | None,
+    eoa_start: str,
+    tx_wait_timeout: int,
+    include_benchmark: bool,
+    gas_benchmark_values: str | None,
+    verbose: int,
+) -> None:
+    """Submit a spec test's transactions to a live devnet/testnet.
+
+    Points EEST `execute remote` straight at --rpc. The network (its
+    validators + builder, e.g. buildoor) produces the blocks; execute funds
+    the sender, deploys the test's contracts, and broadcasts the test
+    transactions into the mempool. Works against a long-living testnet or a
+    local kurtosis devnet alike — no local EL needed.
+
+    TEST_SELECTOR is a pytest path/node-id; combine with -k to narrow.
+    """
+    level = logging.WARNING - (verbose * 10)
+    logging.basicConfig(level=max(level, logging.DEBUG))
+
+    click.echo(f"=== submitting: {test_selector}")
+    click.echo(f"    fork={fork} chain_id={chain_id} rpc={rpc_url}")
+    click.echo(f"    seed={address_from_key(seed_key)}")
+    result = submit_transactions(
+        test_selector=test_selector,
+        fork=fork,
+        rpc_url=rpc_url,
+        chain_id=chain_id,
+        specs_dir=specs_dir,
+        seed_key=seed_key,
+        eoa_start=eoa_start,
+        k_filter=k_filter,
+        csv_path=csv_path,
+        tx_wait_timeout=tx_wait_timeout,
+        include_benchmark=include_benchmark,
+        gas_benchmark_values=gas_benchmark_values,
+    )
+
+    if result.submitted_count is not None:
+        click.echo(f"  submitted {result.submitted_count} transactions")
+        if result.csv_path:
+            click.echo(f"  csv: {result.csv_path}")
+    if result.execute_ok:
+        click.echo("  execute passed (txs included on-chain)")
+    else:
+        # Submission may still have happened — execute also verifies post-state,
+        # which we don't require. Surface the outcome honestly.
+        click.echo(f"  execute did not pass: {result.error}")
+    sys.exit(0 if result.execute_ok else 1)

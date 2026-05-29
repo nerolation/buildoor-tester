@@ -6,18 +6,88 @@ funding, the deterministic-deployment factory, contract deploys) — so a block
 builder like [buildoor](https://github.com/ethpandaops/buildoor) can put them
 in a block on a devnet.
 
-Two commands:
+Three commands:
 
-- **`eest-replay export`** — convert a spec test into a CSV of signed
-  transactions (setup first, then the test txs) plus a matching
-  `genesis.json`. This is the primary tool: it produces a portable,
-  replayable transaction script a builder can pick up later.
+- **`eest-replay submit`** — the primary tool: submit a spec test's
+  transactions directly to a live devnet/testnet RPC. The network's own
+  consensus + builder (e.g. buildoor) produce the blocks; `execute` funds the
+  sender, deploys the test's contracts, and broadcasts the test transactions
+  into the mempool. Works against a long-living testnet or a local kurtosis
+  devnet alike — no local node needed. Optional `--csv` records what was sent.
+- **`eest-replay export`** — for when there is **no** running network: boot a
+  throwaway geth, materialize the same transaction sequence locally, and write
+  it to a CSV plus a matching `genesis.json` a consumer can boot from.
 - **`eest-replay run`** — the correctness oracle: replay a *filled* fixture
   against a throwaway geth and diff the produced block (including the
   EIP-7928 Block Access List) field-by-field against the fixture's expected
   block. Optionally route the build through buildoor.
 
-## `export`: spec test → signed transactions
+## `submit`: run a spec test against a devnet/testnet
+
+```
+eest-replay submit <test-selector> --fork <Fork> --rpc <url> --chain-id <N> \
+    --seed-key <funded-key> [-k <filter>] [--csv out.csv]
+```
+
+This is the simplest and most direct path. On a real network blocks are
+already produced, so there is **no local EL and nothing in the middle** — the
+tool points EEST `execute remote` straight at `--rpc`:
+
+```
+  eest-replay submit ──► execute remote ──► eth_sendRawTransaction ─┐
+                                                                    ▼
+                                          devnet / testnet mempool
+                                                                    │
+                                  validators + builder (buildoor) build blocks
+                                                                    │
+                                          txs included on-chain  ◄──┘
+```
+
+`execute` reads the faucet's live nonce, deploys the deterministic CREATE2
+factory if it isn't already present, deploys the test's contracts, funds the
+test EOAs, and submits the test transactions — all into the target network's
+mempool, where buildoor picks them up.
+
+### Examples
+
+```bash
+# Against a local kurtosis devnet (buildoor is the builder there)
+eest-replay submit \
+  'tests/frontier/opcodes/test_push.py::test_push[fork_Prague-state_test-PUSH1]' \
+  --fork Prague --rpc http://127.0.0.1:8545 --chain-id 7928 \
+  --seed-key 0x<funded-devnet-key>
+
+# A Block Access List test (Amsterdam), recording what was sent
+eest-replay submit \
+  tests/amsterdam/eip7928_block_level_access_lists/test_block_access_lists.py \
+  -k test_bal_nonce_changes \
+  --fork Amsterdam --rpc http://127.0.0.1:8545 --chain-id 7928 \
+  --seed-key 0x<funded-devnet-key> --csv ./submitted.csv
+```
+
+### Requirements & notes
+
+- `--seed-key` must be **funded on the target network**. The default is only
+  prefunded on local devnets — pass your own for a real testnet.
+- `--fork` must match the network's active fork; `--chain-id` is cross-checked
+  against the RPC and the run aborts on mismatch.
+- The deterministic factory is usually already deployed on a real testnet
+  (execute skips it). On a fresh devnet execute deploys it via Nick's keyless
+  method, which needs the EL to accept unprotected txs.
+- We only care that the transactions are **submitted and included**; `execute`
+  additionally verifies post-state and will report failure on a mismatch even
+  though the txs were still broadcast. With `--csv` the recorded rows are the
+  ground truth of what went on-chain.
+- On a shared network, override `--eoa-start` per caller so ephemeral EOA keys
+  don't collide with another run.
+
+## `export`: materialize transactions locally (no network)
+
+Use this when you don't have a devnet running and just want the transaction
+sequence on disk. It boots a throwaway geth, drives block production itself via
+the Engine API, and writes the captured transactions plus a matching
+`genesis.json` — so a consumer can later boot a compatible EL and replay them.
+(If you already have a devnet, prefer `submit`.)
 
 ```
 eest-replay export <test-selector> --fork <Fork> [-k <filter>] [--output dir]
@@ -112,10 +182,10 @@ seq  from                  to                    note
 buildoor-tester/
 ├── pyproject.toml             # uv project for the `eest-replay` CLI
 ├── src/eest_replay/
-│   ├── cli.py                 # `eest-replay export` + `eest-replay run`
-│   ├── export.py              # spec test → signed-tx CSV (orchestrates execute)
+│   ├── cli.py                 # `submit` + `export` + `run` subcommands
+│   ├── export.py              # submit/export: orchestrate EEST `execute remote`
 │   ├── rpc_proxy.py           # recording JSON-RPC proxy (tees sendRawTransaction)
-│   ├── devnet_genesis.py      # fresh devnet genesis for a target fork
+│   ├── devnet_genesis.py      # fresh devnet genesis for a target fork (export)
 │   ├── fixture.py             # BlockchainEngineFixture loading + discovery
 │   ├── chainspec.py           # fixture.pre + genesis → geth genesis.json
 │   ├── el.py                  # throwaway geth lifecycle (Docker)
