@@ -105,6 +105,11 @@ def export_transactions(
     # the account `execute` will actually spend from.
     if seed_addr is None:
         seed_addr = address_from_key(seed_key)
+    # Benchmark runs default to the fork's max per-tx gas; overridable.
+    if gas_benchmark_values is None and _is_benchmark_run(
+        test_selector, include_benchmark
+    ):
+        gas_benchmark_values = default_gas_benchmark_values(fork)
 
     genesis = build_devnet_genesis(
         fork=fork,
@@ -233,6 +238,12 @@ def submit_transactions(
     """
     if eoa_start is None:
         eoa_start = random_eoa_start()
+    # Benchmark runs default to the fork's max per-tx gas; --gas-benchmark-values
+    # overrides it.
+    if gas_benchmark_values is None and _is_benchmark_run(
+        test_selector, include_benchmark
+    ):
+        gas_benchmark_values = default_gas_benchmark_values(fork)
     common = dict(
         specs_dir=specs_dir,
         test_selector=test_selector,
@@ -418,6 +429,39 @@ def _get_tx(rpc_url: str, tx_hash: str) -> Dict[str, Any] | None:
 def address_from_key(priv_hex: str) -> str:
     """Derive the lowercase 0x address for a private key."""
     return str(EOA(key=int(priv_hex, 16)))
+
+
+# Whole-million benchmark gas used when the target fork has no per-tx gas cap
+# (pre-Osaka). A hefty default that fits typical devnet/testnet block limits.
+FALLBACK_BENCHMARK_GAS_MILLIONS = 16
+
+
+def default_gas_benchmark_values(fork: str) -> str:
+    """
+    Return the whole-millions gas-benchmark value targeting the fork's MAX tx
+    gas, as a string for ``--gas-benchmark-values``.
+
+    From Osaka on, EIP-7825 caps a single transaction at 2**24 = 16,777,216
+    gas. ``--gas-benchmark-values`` is expressed in WHOLE millions
+    (``value * 1_000_000``), so exactly 2**24 isn't expressible and 17M would
+    exceed the cap and be rejected; we use ``floor(cap / 1_000_000)`` = 16,
+    i.e. 16,000,000 gas — the largest valid whole-million under the cap.
+    Forks without a per-tx cap fall back to a large default.
+    """
+    try:
+        import execution_testing.forks as forks_mod
+
+        fork_cls = getattr(forks_mod, fork, None)
+        cap = fork_cls.transaction_gas_limit_cap() if fork_cls else None
+    except Exception:  # noqa: BLE001 - never let fork lookup break a run
+        cap = None
+    millions = (cap // 1_000_000) if cap else FALLBACK_BENCHMARK_GAS_MILLIONS
+    return str(millions)
+
+
+def _is_benchmark_run(test_selector: str, include_benchmark: bool) -> bool:
+    """Whether this run targets benchmark tests (which honor gas values)."""
+    return include_benchmark or "tests/benchmark" in test_selector
 
 
 def random_eoa_start() -> str:

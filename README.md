@@ -189,7 +189,7 @@ seq  from                  to                    note
 | `--specs-dir` | path to the execution-specs checkout (default `../execution-specs`) |
 | `--chain-id` | devnet chain id (default 7928) |
 | `--seed-key` | genesis-prefunded private key that funds the test (devnet only) |
-| `--include-benchmark` / `--gas-benchmark-values` | enable benchmark tests |
+| `--include-benchmark` / `--gas-benchmark-values` | enable benchmark tests. `--gas-benchmark-values` is WHOLE millions and **defaults to the fork's max per-tx gas** (16 = 16M on Osaka+, the largest whole-million under the 2²⁴ EIP-7825 cap); pass a value to override (e.g. `1`). |
 
 > [!NOTE]
 > The seed key is a **devnet test key** that is prefunded in the emitted

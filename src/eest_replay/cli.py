@@ -201,7 +201,10 @@ def _print_result(result: FixtureResult) -> None:
 @click.option("--include-benchmark", is_flag=True,
               help="Allow tests/benchmark/ selection.")
 @click.option("--gas-benchmark-values", default=None,
-              help="Gas limits in millions for benchmark tests, e.g. '1'.")
+              help="Gas limits in WHOLE millions for benchmark tests, e.g. "
+              "'1' or '8,16'. Default: the fork's max per-tx gas (16 on "
+              "Osaka+, i.e. 16M, the largest whole-million under the 2**24 "
+              "EIP-7825 cap).")
 @click.option("-k", "k_filter", default=None,
               help="pytest -k filter passed through to `execute remote`.")
 @click.option("-v", "--verbose", count=True)
@@ -298,7 +301,10 @@ def export_cmd(
 @click.option("--include-benchmark", is_flag=True,
               help="Allow tests/benchmark/ selection.")
 @click.option("--gas-benchmark-values", default=None,
-              help="Gas limits in millions for benchmark tests, e.g. '1'.")
+              help="Gas limits in WHOLE millions for benchmark tests, e.g. "
+              "'1' or '8,16'. Default: the fork's max per-tx gas (16 on "
+              "Osaka+, i.e. 16M, the largest whole-million under the 2**24 "
+              "EIP-7825 cap).")
 @click.option("--gas-price", type=int, default=None,
               help="Legacy gas price in WEI (set on nets with ~0 fees).")
 @click.option("--max-fee-per-gas", type=int, default=None,
