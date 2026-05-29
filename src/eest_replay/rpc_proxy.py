@@ -10,13 +10,43 @@ logic works and the captured sequence is exactly what was broadcast.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import socket
 import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Iterator, List
+from typing import Dict, Iterator, List, Tuple
+from urllib.parse import urlsplit, urlunsplit
+
+# Some hosted RPC endpoints sit behind a WAF that 403s urllib's default
+# "Python-urllib/x" User-Agent. Send a conventional one (requests, which
+# `execute` uses directly, is not blocked).
+DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; eest-replay)"
+
+
+def split_basic_auth(url: str) -> Tuple[str, Dict[str, str]]:
+    """
+    Split inline ``user:pass@`` credentials out of a URL.
+
+    Returns ``(clean_url, headers)`` where ``headers`` carries an
+    ``Authorization: Basic`` entry when the URL embedded credentials (urllib,
+    unlike requests, does not apply them automatically). Hosted RPC endpoints
+    commonly embed basic-auth creds in the URL.
+    """
+    parts = urlsplit(url)
+    if not parts.username:
+        return url, {}
+    creds = f"{parts.username}:{parts.password or ''}"
+    token = base64.b64encode(creds.encode()).decode()
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc += f":{parts.port}"
+    clean = urlunsplit(
+        (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+    )
+    return clean, {"Authorization": f"Basic {token}"}
 
 
 class _Recorder:
@@ -49,6 +79,8 @@ def _extract_raw_txs(payload: object, recorder: _Recorder) -> None:
 
 
 def _make_handler(target_url: str, recorder: _Recorder):
+    clean_url, auth_headers = split_basic_auth(target_url)
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -60,9 +92,13 @@ def _make_handler(target_url: str, recorder: _Recorder):
             body = self.rfile.read(length)
 
             req = urllib.request.Request(
-                target_url,
+                clean_url,
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": DEFAULT_USER_AGENT,
+                    **auth_headers,
+                },
                 method="POST",
             )
             try:

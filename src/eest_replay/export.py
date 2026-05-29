@@ -34,7 +34,7 @@ from execution_testing.base_types import Bytes
 
 from .devnet_genesis import DEFAULT_PREFUND_WEI, build_devnet_genesis
 from .el import geth
-from .rpc_proxy import recording_proxy
+from .rpc_proxy import DEFAULT_USER_AGENT, recording_proxy, split_basic_auth
 
 # Devnet seed key (genesis-prefunded). Matches buildoor's devnet wallet key so
 # the emitted genesis is consistent with buildoor's .hack/devnet conventions.
@@ -210,6 +210,9 @@ def submit_transactions(
     tx_wait_timeout: int = 120,
     include_benchmark: bool = False,
     gas_benchmark_values: str | None = None,
+    gas_price: int | None = None,
+    max_fee_per_gas: int | None = None,
+    max_priority_fee_per_gas: int | None = None,
 ) -> SubmitResult:
     """
     Submit a spec test's transactions to a live devnet/testnet RPC.
@@ -218,6 +221,10 @@ def submit_transactions(
     no Engine API / local EL is involved — execute just broadcasts the txs and
     polls for inclusion. ``seed_key`` must be funded on the target network.
     When ``csv_path`` is given, every submitted transaction is also recorded.
+
+    Pass explicit gas prices (wei) on networks where the RPC reports a zero
+    priority fee — otherwise execute derives a max-fee of 0 and the txs are
+    rejected below the base fee.
     """
     common = dict(
         specs_dir=specs_dir,
@@ -230,6 +237,9 @@ def submit_transactions(
         include_benchmark=include_benchmark,
         gas_benchmark_values=gas_benchmark_values,
         k_filter=k_filter,
+        gas_price=gas_price,
+        max_fee_per_gas=max_fee_per_gas,
+        max_priority_fee_per_gas=max_priority_fee_per_gas,
     )
 
     if csv_path is not None:
@@ -272,6 +282,9 @@ def _run_execute(
     gas_benchmark_values: str | None = None,
     k_filter: str | None = None,
     skip_cleanup: bool = True,
+    gas_price: int | None = None,
+    max_fee_per_gas: int | None = None,
+    max_priority_fee_per_gas: int | None = None,
 ) -> tuple[bool, str | None]:
     """Invoke `execute remote` in the execution-specs venv as a subprocess.
 
@@ -296,6 +309,13 @@ def _run_execute(
             cmd += ["--engine-jwt-secret-file", str(jwt_path)]
     if skip_cleanup:
         cmd.append("--skip-cleanup")
+    if gas_price is not None:
+        cmd += ["--default-gas-price", str(gas_price)]
+    if max_fee_per_gas is not None:
+        cmd += ["--default-max-fee-per-gas", str(max_fee_per_gas)]
+    if max_priority_fee_per_gas is not None:
+        cmd += ["--default-max-priority-fee-per-gas",
+                str(max_priority_fee_per_gas)]
     if include_benchmark:
         cmd.append("--include-benchmark")
     if gas_benchmark_values:
@@ -367,12 +387,19 @@ def _row(seq: int, raw: str, tx_hash: str, info: Dict[str, Any] | None) -> Dict[
 
 
 def _get_tx(rpc_url: str, tx_hash: str) -> Dict[str, Any] | None:
+    clean_url, auth_headers = split_basic_auth(rpc_url)
     body = json.dumps(
         {"jsonrpc": "2.0", "id": 1,
          "method": "eth_getTransactionByHash", "params": [tx_hash]}
     ).encode()
     req = urllib.request.Request(
-        rpc_url, data=body, headers={"Content-Type": "application/json"}
+        clean_url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": DEFAULT_USER_AGENT,
+            **auth_headers,
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:

@@ -80,6 +80,16 @@ eest-replay submit \
   ground truth of what went on-chain.
 - On a shared network, override `--eoa-start` per caller so ephemeral EOA keys
   don't collide with another run.
+- **Gas prices:** if the target RPC reports a zero priority fee (common on
+  testnets), `execute` derives a max-fee of 0 and every tx is rejected below
+  base fee. Pass explicit WEI values, e.g.
+  `--max-fee-per-gas 5000000000 --max-priority-fee-per-gas 1000000000`
+  (5 / 1 gwei) — comfortably above a testnet base fee.
+- **Hosted endpoints:** `--rpc` may embed `user:pass@` basic-auth creds; the
+  CSV-recording proxy applies them and sends a normal User-Agent (some
+  gateways 403 the default urllib agent). Note that some read/load RPC
+  gateways reject `eth_sendRawTransaction` outright (e.g. a canned
+  "gas limit is too high" even for a 21000-gas tx) — point at a writable RPC.
 
 ## `export`: materialize transactions locally (no network)
 

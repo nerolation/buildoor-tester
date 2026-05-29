@@ -299,6 +299,14 @@ def export_cmd(
               help="Allow tests/benchmark/ selection.")
 @click.option("--gas-benchmark-values", default=None,
               help="Gas limits in millions for benchmark tests, e.g. '1'.")
+@click.option("--gas-price", type=int, default=None,
+              help="Legacy gas price in WEI (set on nets with ~0 fees).")
+@click.option("--max-fee-per-gas", type=int, default=None,
+              help="EIP-1559 max fee per gas in WEI. Set this on a network "
+              "whose RPC reports a 0 priority fee, or txs are rejected below "
+              "base fee. e.g. 5000000000 (5 gwei).")
+@click.option("--max-priority-fee-per-gas", type=int, default=None,
+              help="EIP-1559 max priority fee per gas in WEI, e.g. 1000000000.")
 @click.option("-v", "--verbose", count=True)
 def submit_cmd(
     test_selector: str,
@@ -313,6 +321,9 @@ def submit_cmd(
     tx_wait_timeout: int,
     include_benchmark: bool,
     gas_benchmark_values: str | None,
+    gas_price: int | None,
+    max_fee_per_gas: int | None,
+    max_priority_fee_per_gas: int | None,
     verbose: int,
 ) -> None:
     """Submit a spec test's transactions to a live devnet/testnet.
@@ -344,6 +355,9 @@ def submit_cmd(
         tx_wait_timeout=tx_wait_timeout,
         include_benchmark=include_benchmark,
         gas_benchmark_values=gas_benchmark_values,
+        gas_price=gas_price,
+        max_fee_per_gas=max_fee_per_gas,
+        max_priority_fee_per_gas=max_priority_fee_per_gas,
     )
 
     if result.submitted_count is not None:
